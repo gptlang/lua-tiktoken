@@ -3,7 +3,7 @@ version = "0.1.0-1"
 
 source = {
     url = "git+https://github.com/gptlang/lua-tiktoken",
-    tag = "0.1.0",
+    -- tag = "0.1.0",
 }
 
 description = {

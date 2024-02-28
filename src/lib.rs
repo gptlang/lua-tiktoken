@@ -210,10 +210,14 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
 
 fn new(
     state: &State,
-    encoder: HashMap<Vec<u8>, usize>,
+    iencoder: HashMap<LuaString, usize>,
     special_tokens_encoder: HashMap<String, usize>,
     pattern: String,
 ) {
+    let encoder: HashMap<Vec<u8>, usize> = iencoder
+        .into_iter()
+        .map(|(k, v)| (k.as_bytes().to_vec(), v))
+        .collect();
     let regex = Regex::new(&pattern)
         .map_err(|e| mlua::Error::external(e))
         .unwrap();
