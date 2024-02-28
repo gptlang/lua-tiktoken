@@ -192,7 +192,7 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
     let _new = lua.create_function(
         move |_,
               (encoder, special_tokens_encoder, pattern): (
-            HashMap<Vec<u8>, usize>,
+            HashMap<LuaString, usize>,
             HashMap<String, usize>,
             String,
         )| {
