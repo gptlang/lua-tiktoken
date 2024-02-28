@@ -1,8 +1,9 @@
-use std::collections::HashSet;
-use std::thread;
-
 use fancy_regex::Regex;
+use mlua::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 #[cfg(feature = "multithreading")]
 const MAX_NUM_THREADS: usize = 128;
@@ -174,6 +175,92 @@ fn hash_current_thread() -> usize {
         std::mem::transmute::<std::thread::ThreadId, FakeThreadId>(thread::current().id()).0
     };
     u64::from(x) as usize
+}
+
+struct State {
+    core_bpe: Mutex<Option<CoreBPENative>>,
+}
+
+#[mlua::lua_module]
+pub fn core_module(lua: &mlua::Lua) -> LuaResult<LuaTable> {
+    let core_bpe = State {
+        core_bpe: Mutex::new(None),
+    };
+    let state = Arc::new(core_bpe);
+    let state2 = Arc::clone(&state);
+
+    let _new = lua.create_function(
+        move |_,
+              (encoder, special_tokens_encoder, pattern): (
+            HashMap<Vec<u8>, usize>,
+            HashMap<String, usize>,
+            String,
+        )| {
+            new(&*state, encoder, special_tokens_encoder, pattern);
+            Ok(())
+        },
+    )?;
+    let _encode = lua.create_function(move |_, text: String| encode(&*state2, text))?;
+
+    let exports = lua.create_table()?;
+    exports.set("new", _new)?;
+    exports.set("encode", _encode)?;
+    Ok(exports)
+}
+
+fn new(
+    state: &State,
+    encoder: HashMap<Vec<u8>, usize>,
+    special_tokens_encoder: HashMap<String, usize>,
+    pattern: String,
+) {
+    let regex = Regex::new(&pattern)
+        .map_err(|e| mlua::Error::external(e))
+        .unwrap();
+    let special_regex = {
+        let _parts = special_tokens_encoder
+            .keys()
+            .map(|s| fancy_regex::escape(s))
+            .collect::<Vec<_>>();
+        Regex::new(&_parts.join("|"))
+            .map_err(|e| mlua::Error::external(e))
+            .unwrap()
+    };
+    let decoder: HashMap<usize, Vec<u8>> = encoder.iter().map(|(k, v)| (*v, k.clone())).collect();
+    assert!(
+            encoder.len() == decoder.len(),
+            "Encoder and decoder must be of equal length; maybe you had duplicate token indices in your encoder?"
+        );
+    let special_tokens_decoder: HashMap<usize, Vec<u8>> = special_tokens_encoder
+        .iter()
+        .map(|(k, v)| (*v, k.as_bytes().to_vec()))
+        .collect();
+    let mut sorted_token_bytes: Vec<Vec<u8>> = encoder.keys().cloned().collect();
+    sorted_token_bytes.sort();
+    let mut core_bpe_lock = state.core_bpe.lock().unwrap();
+    *core_bpe_lock = Some(CoreBPENative {
+        encoder,
+        special_tokens_encoder,
+        decoder,
+        special_tokens_decoder,
+        regex_tls: (0..MAX_NUM_THREADS).map(|_| regex.clone()).collect(),
+        special_regex_tls: (0..MAX_NUM_THREADS)
+            .map(|_| special_regex.clone())
+            .collect(),
+        sorted_token_bytes,
+    });
+}
+
+fn encode(state: &State, text: String) -> LuaResult<(Vec<usize>, usize, usize)> {
+    let allowed_special = HashSet::new();
+    let max_tokens = None;
+    Ok(state
+        .core_bpe
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        ._encode_native(&text, &allowed_special, max_tokens))
 }
 
 pub struct CoreBPENative {
