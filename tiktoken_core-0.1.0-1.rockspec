@@ -1,4 +1,4 @@
-package = "tiktoken.lua"
+package = "tiktoken_core"
 version = "0.1.0-1"
 
 source = {
