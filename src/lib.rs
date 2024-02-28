@@ -182,7 +182,7 @@ struct State {
 }
 
 #[mlua::lua_module]
-pub fn core_module(lua: &mlua::Lua) -> LuaResult<LuaTable> {
+pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
     let core_bpe = State {
         core_bpe: Mutex::new(None),
     };
