@@ -2,8 +2,11 @@ use fancy_regex::Regex;
 use mlua::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use base64;
 
 #[cfg(feature = "multithreading")]
 const MAX_NUM_THREADS: usize = 128;
@@ -191,12 +194,12 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
 
     let _new = lua.create_function(
         move |_,
-              (encoder, special_tokens_encoder, pattern): (
-            HashMap<LuaString, usize>,
+              (encoder_path, special_tokens_encoder, pattern): (
+            String,
             HashMap<String, usize>,
             String,
         )| {
-            new(&*state, encoder, special_tokens_encoder, pattern);
+            new(&*state, encoder_path, special_tokens_encoder, pattern);
             Ok(())
         },
     )?;
@@ -210,14 +213,21 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
 
 fn new(
     state: &State,
-    iencoder: HashMap<LuaString, usize>,
+    encoder_path: String,
     special_tokens_encoder: HashMap<String, usize>,
     pattern: String,
 ) {
-    let encoder: HashMap<Vec<u8>, usize> = iencoder
-        .into_iter()
-        .map(|(k, v)| (k.as_bytes().to_vec(), v))
-        .collect();
+    let mut encoder: HashMap<Vec<u8>, usize> = HashMap::default();
+    // Read the encoder file each line is a base64 encoded token and rank separated by a space
+    let file = File::open(encoder_path).unwrap();
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.unwrap();
+        let mut parts = line.split_whitespace();
+        let token = base64::decode(parts.next().unwrap().as_bytes()).unwrap();
+        let rank = parts.next().unwrap().parse().unwrap();
+        encoder.insert(token, rank);
+    }
     let regex = Regex::new(&pattern)
         .map_err(|e| mlua::Error::external(e))
         .unwrap();
@@ -230,11 +240,6 @@ fn new(
             .map_err(|e| mlua::Error::external(e))
             .unwrap()
     };
-    let decoder: HashMap<usize, Vec<u8>> = encoder.iter().map(|(k, v)| (*v, k.clone())).collect();
-    assert!(
-            encoder.len() == decoder.len(),
-            "Encoder and decoder must be of equal length; maybe you had duplicate token indices in your encoder?"
-        );
     let special_tokens_decoder: HashMap<usize, Vec<u8>> = special_tokens_encoder
         .iter()
         .map(|(k, v)| (*v, k.as_bytes().to_vec()))
@@ -245,7 +250,8 @@ fn new(
     *core_bpe_lock = Some(CoreBPENative {
         encoder,
         special_tokens_encoder,
-        decoder,
+        // empty decoder
+        decoder: HashMap::default(),
         special_tokens_decoder,
         regex_tls: (0..MAX_NUM_THREADS).map(|_| regex.clone()).collect(),
         special_regex_tls: (0..MAX_NUM_THREADS)
