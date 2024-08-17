@@ -1,0 +1,91 @@
+name: Create Release and Upload Artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build_and_release:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        feature: [lua54, lua53, lua52, lua51, luajit]
+        arch: [x86_64, aarch64]
+        exclude:
+          - os: ubuntu-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-${{ matrix.os == 'ubuntu-latest' && 'unknown-linux-gnu' || 'apple-darwin' }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.arch }}" == "aarch64" ]; then
+            if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
+              RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc" cargo build --release --features ${{ matrix.feature }} --target aarch64-unknown-linux-gnu
+            else
+              cargo build --release --features ${{ matrix.feature }} --target aarch64-apple-darwin
+            fi
+          else
+            cargo build --release --features ${{ matrix.feature }}
+          fi
+
+      - name: Prepare artifact
+        run: |
+          if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
+            OS="linux"
+            EXT="so"
+          else
+            OS="macOS"
+            EXT="dylib"
+          fi
+          ARCH="${{ matrix.arch == 'x86_64' && 'x86_64' || 'arm64' }}"
+          mkdir -p artifacts
+          if [ "${{ matrix.arch }}" == "aarch64" ]; then
+            if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
+              cp target/aarch64-unknown-linux-gnu/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+            else
+              cp target/aarch64-apple-darwin/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+            fi
+          else
+            cp target/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktoken_core-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.feature }}
+          path: artifacts/*
+
+  release:
+    needs: build_and_release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
