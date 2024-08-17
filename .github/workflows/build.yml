@@ -1,0 +1,45 @@
+name: Build and Upload Artifacts
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        feature: [lua54, lua53, lua52, lua51, luajit]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Build
+      run: cargo build --release --features ${{ matrix.feature }}
+
+    - name: Prepare artifact
+      run: |
+        if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
+          OS="linux"
+          EXT="so"
+        else
+          OS="macOS"
+          EXT="dylib"
+        fi
+        mkdir -p artifacts
+        cp target/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-${{ matrix.feature }}.$EXT
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: tiktoken_core-${{ matrix.os }}-${{ matrix.feature }}
+        path: artifacts/tiktoken_core-*.${{ matrix.os == 'ubuntu-latest' && 'so' || 'dylib' }}
