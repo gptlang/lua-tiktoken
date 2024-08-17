@@ -12,9 +12,6 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         feature: [lua54, lua53, lua52, lua51, luajit]
         arch: [x86_64, aarch64]
-        exclude:
-          - os: ubuntu-latest
-            arch: aarch64
     runs-on: ${{ matrix.os }}
 
     steps:
