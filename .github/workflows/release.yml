@@ -9,9 +9,13 @@ jobs:
   build_and_release:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         feature: [lua54, lua53, lua52, lua51, luajit]
         arch: [x86_64, aarch64]
+        exclude:
+          - os: windows-latest
+            arch: aarch64
+
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -20,7 +24,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.arch }}-${{ matrix.os == 'ubuntu-latest' && 'unknown-linux-gnu' || 'apple-darwin' }}
+          targets: ${{ matrix.arch }}-${{ matrix.os == 'ubuntu-latest' && 'unknown-linux-gnu' || matrix.os == 'macos-latest' && 'apple-darwin' || 'pc-windows-msvc' }}
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
@@ -29,6 +33,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.arch }}" == "aarch64" ]; then
             if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
@@ -41,13 +46,17 @@ jobs:
           fi
 
       - name: Prepare artifact
+        shell: bash
         run: |
           if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
             OS="linux"
             EXT="so"
-          else
+          elif [ "${{ matrix.os }}" == "macos-latest" ]; then
             OS="macOS"
             EXT="dylib"
+          else
+            OS="windows"
+            EXT="dll"
           fi
           ARCH="${{ matrix.arch == 'x86_64' && 'x86_64' || 'arm64' }}"
           mkdir -p artifacts
@@ -58,7 +67,11 @@ jobs:
               cp target/aarch64-apple-darwin/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
             fi
           else
-            cp target/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+            if [ "${{ matrix.os }}" == "windows-latest" ]; then
+              cp target/release/tiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+            else
+              cp target/release/libtiktoken_core.$EXT artifacts/tiktoken_core-$OS-$ARCH-${{ matrix.feature }}.$EXT
+            fi
           fi
 
       - name: Upload artifacts
