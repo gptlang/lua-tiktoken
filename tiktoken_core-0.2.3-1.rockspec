@@ -1,9 +1,9 @@
 package = "tiktoken_core"
-version = "0.2.2-1"
+version = "0.2.3-1"
 
 source = {
 	url = "git+https://github.com/gptlang/lua-tiktoken",
-	tag = "v0.2.2",
+	tag = "v0.2.3",
 }
 
 description = {

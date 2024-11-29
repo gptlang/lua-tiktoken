@@ -1,3 +1,4 @@
+use base64;
 use fancy_regex::Regex;
 use mlua::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
@@ -6,7 +7,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use base64;
 
 #[cfg(feature = "multithreading")]
 const MAX_NUM_THREADS: usize = 128;
@@ -203,7 +203,7 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
             Ok(())
         },
     )?;
-    let _encode = lua.create_function(move |_, text: String| encode(&*state2, text))?;
+    let _encode = lua.create_function(move |_, text: mlua::String| encode(&*state2, text))?;
 
     let exports = lua.create_table()?;
     exports.set("new", _new)?;
@@ -261,7 +261,8 @@ fn new(
     });
 }
 
-fn encode(state: &State, text: String) -> LuaResult<(Vec<usize>, usize, usize)> {
+fn encode(state: &State, text: mlua::String) -> LuaResult<(Vec<usize>, usize, usize)> {
+    let encoded_str = String::from_utf8_lossy(text.as_bytes());
     let allowed_special = HashSet::new();
     let max_tokens = None;
     Ok(state
@@ -270,7 +271,7 @@ fn encode(state: &State, text: String) -> LuaResult<(Vec<usize>, usize, usize)> 
         .unwrap()
         .as_ref()
         .unwrap()
-        ._encode_native(&text, &allowed_special, max_tokens))
+        ._encode_native(&encoded_str, &allowed_special, max_tokens))
 }
 
 pub struct CoreBPENative {
