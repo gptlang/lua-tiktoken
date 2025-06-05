@@ -1,4 +1,4 @@
-use base64;
+use base64::{prelude::BASE64_STANDARD, Engine as _};
 use fancy_regex::Regex;
 use mlua::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
@@ -8,10 +8,6 @@ use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-#[cfg(feature = "multithreading")]
-const MAX_NUM_THREADS: usize = 128;
-
-#[cfg(not(feature = "multithreading"))]
 const MAX_NUM_THREADS: usize = 1;
 
 fn _byte_pair_merge<T>(
@@ -224,7 +220,9 @@ fn new(
     for line in reader.lines() {
         let line = line.unwrap();
         let mut parts = line.split_whitespace();
-        let token = base64::decode(parts.next().unwrap().as_bytes()).unwrap();
+        let token = BASE64_STANDARD
+            .decode(parts.next().unwrap().as_bytes())
+            .unwrap();
         let rank = parts.next().unwrap().parse().unwrap();
         encoder.insert(token, rank);
     }
@@ -262,7 +260,8 @@ fn new(
 }
 
 fn encode(state: &State, text: mlua::String) -> LuaResult<(Vec<usize>, usize, usize)> {
-    let encoded_str = String::from_utf8_lossy(text.as_bytes());
+    let text_bytes = text.as_bytes();
+    let encoded_str = String::from_utf8_lossy(&text_bytes);
     let allowed_special = HashSet::new();
     let max_tokens = None;
     Ok(state
@@ -590,13 +589,6 @@ impl CoreBPENative {
             }
         }
         Err(piece.to_owned())
-    }
-
-    fn encode_single_piece(&self, piece: &[u8]) -> Vec<usize> {
-        if let Some(token) = self.encoder.get(piece) {
-            return vec![*token];
-        }
-        byte_pair_encode(piece, &self.encoder)
     }
 
     // ====================
