@@ -215,19 +215,32 @@ fn new(
 ) {
     let mut encoder: HashMap<Vec<u8>, usize> = HashMap::default();
     // Read the encoder file each line is a base64 encoded token and rank separated by a space
-    let file = File::open(encoder_path).unwrap();
+    let file = File::open(&encoder_path)
+        .map_err(|e| format!("Failed to open encoder file '{}': {}", encoder_path, e))
+        .unwrap();
     let reader = BufReader::new(file);
     for line in reader.lines() {
-        let line = line.unwrap();
-        let mut parts = line.split_whitespace();
-        let token = BASE64_STANDARD
-            .decode(parts.next().unwrap().as_bytes())
+        let line = line
+            .map_err(|e| format!("Failed to read line from encoder file: {}", e))
             .unwrap();
-        let rank = parts.next().unwrap().parse().unwrap();
+        let mut parts = line.split_whitespace();
+        let token_b64 = parts.next()
+            .ok_or_else(|| format!("Invalid encoder file format: missing token in line '{}'", line))
+            .unwrap();
+        let token = BASE64_STANDARD
+            .decode(token_b64.as_bytes())
+            .map_err(|e| format!("Failed to decode base64 token '{}': {}", token_b64, e))
+            .unwrap();
+        let rank_str = parts.next()
+            .ok_or_else(|| format!("Invalid encoder file format: missing rank in line '{}'", line))
+            .unwrap();
+        let rank = rank_str.parse()
+            .map_err(|e| format!("Failed to parse rank '{}': {}", rank_str, e))
+            .unwrap();
         encoder.insert(token, rank);
     }
     let regex = Regex::new(&pattern)
-        .map_err(|e| mlua::Error::external(e))
+        .map_err(|e| format!("Failed to compile main regex pattern '{}': {}", pattern, e))
         .unwrap();
     let special_regex = {
         let _parts = special_tokens_encoder
@@ -235,7 +248,7 @@ fn new(
             .map(|s| fancy_regex::escape(s))
             .collect::<Vec<_>>();
         Regex::new(&_parts.join("|"))
-            .map_err(|e| mlua::Error::external(e))
+            .map_err(|e| format!("Failed to compile special tokens regex: {}", e))
             .unwrap()
     };
     let special_tokens_decoder: HashMap<usize, Vec<u8>> = special_tokens_encoder
@@ -244,7 +257,9 @@ fn new(
         .collect();
     let mut sorted_token_bytes: Vec<Vec<u8>> = encoder.keys().cloned().collect();
     sorted_token_bytes.sort();
-    let mut core_bpe_lock = state.core_bpe.lock().unwrap();
+    let mut core_bpe_lock = state.core_bpe.lock()
+        .map_err(|e| format!("Failed to acquire lock on core_bpe: {}", e))
+        .unwrap();
     *core_bpe_lock = Some(CoreBPENative {
         encoder,
         special_tokens_encoder,
@@ -267,9 +282,9 @@ fn encode(state: &State, text: mlua::String) -> LuaResult<(Vec<usize>, usize, us
     Ok(state
         .core_bpe
         .lock()
-        .unwrap()
+        .map_err(|e| mlua::Error::external(format!("Failed to acquire lock on core_bpe: {}", e)))?
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| mlua::Error::external("Core BPE not initialized"))?
         ._encode_native(&encoded_str, &allowed_special, max_tokens))
 }
 
@@ -313,7 +328,10 @@ impl CoreBPENative {
         let regex = self._get_tl_regex();
         let mut ret = vec![];
         for mat in regex.find_iter(text) {
-            let piece = mat.unwrap().as_str().as_bytes();
+            let piece = mat
+                .map_err(|e| format!("Regex matching failed: {}", e))
+                .unwrap()
+                .as_str().as_bytes();
             if let Some(token) = self.encoder.get(piece) {
                 ret.push(*token);
                 continue;
@@ -341,7 +359,9 @@ impl CoreBPENative {
             let mut start_find = start;
             loop {
                 // Find the next allowed special token, if any
-                next_special = special_regex.find_from_pos(text, start_find).unwrap();
+                next_special = special_regex.find_from_pos(text, start_find)
+                    .map_err(|e| format!("Special regex matching failed at position {}: {}", start_find, e))
+                    .unwrap();
                 match next_special {
                     Some(m) => {
                         if allowed_special.contains(&text[m.start()..m.end()]) {
@@ -356,7 +376,10 @@ impl CoreBPENative {
 
             // Okay, here we go, compare this logic to _encode_ordinary_native
             for mat in regex.find_iter(&text[start..end]) {
-                let piece = mat.unwrap().as_str().as_bytes();
+                let piece = mat
+                    .map_err(|e| format!("Regex matching failed in text slice: {}", e))
+                    .unwrap()
+                    .as_str().as_bytes();
                 if let Some(token) = self.encoder.get(piece) {
                     last_piece_token_len = 1;
                     ret.push(*token);
