@@ -112,6 +112,73 @@ pub fn byte_pair_encode(piece: &[u8], ranks: &HashMap<Vec<u8>, usize>) -> Vec<us
     _byte_pair_merge(piece, ranks, |p| ranks[&piece[p.start..p.end]])
 }
 
+pub fn byte_pair_count(piece: &[u8], ranks: &HashMap<Vec<u8>, usize>) -> usize {
+    if piece.len() == 1 {
+        return 1;
+    }
+
+    // This is the same merge loop as _byte_pair_merge, but it only keeps the
+    // final number of parts so count-only callers do not allocate token IDs.
+    let mut parts: Vec<(usize, usize)> = (0..piece.len() + 1).map(|i| (i, usize::MAX)).collect();
+
+    macro_rules! get_rank {
+        ($start_idx:expr, $skip:expr) => {{
+            let start_idx: usize = $start_idx;
+            let skip: usize = $skip;
+            if (start_idx + skip + 2) < parts.len() {
+                ranks
+                    .get(&piece[parts[start_idx].0..parts[start_idx + skip + 2].0])
+                    .map(|r| *r)
+            } else {
+                None
+            }
+        }};
+        ($idx:expr) => {{
+            get_rank!($idx, 0)
+        }};
+    }
+
+    for i in 0..parts.len() - 2 {
+        match get_rank!(i) {
+            Some(rank) => {
+                debug_assert!(rank != usize::MAX);
+                parts[i].1 = rank;
+            }
+            None => {
+                continue;
+            }
+        };
+    }
+
+    loop {
+        if parts.len() == 1 {
+            break;
+        }
+
+        let mut min_rank: (usize, usize) = (usize::MAX, 0);
+        for (i, &(_, rank)) in parts[..parts.len() - 1].iter().enumerate() {
+            if rank < min_rank.0 {
+                min_rank = (rank, i);
+            }
+        }
+
+        if min_rank.0 != usize::MAX {
+            let i = min_rank.1;
+
+            parts[i].1 = get_rank!(i, 1).unwrap_or(usize::MAX);
+            if i > 0 {
+                parts[i - 1].1 = get_rank!(i - 1, 1).unwrap_or(usize::MAX);
+            }
+
+            parts.remove(i + 1);
+        } else {
+            break;
+        }
+    }
+
+    parts.len() - 1
+}
+
 pub fn byte_pair_split<'a>(piece: &'a [u8], ranks: &HashMap<Vec<u8>, usize>) -> Vec<&'a [u8]> {
     if piece.len() == 1 {
         return vec![piece];
@@ -187,6 +254,7 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
     };
     let state = Arc::new(core_bpe);
     let state2 = Arc::clone(&state);
+    let state3 = Arc::clone(&state);
 
     let _new = lua.create_function(
         move |_,
@@ -200,10 +268,12 @@ pub fn tiktoken_core(lua: &mlua::Lua) -> LuaResult<LuaTable> {
         },
     )?;
     let _encode = lua.create_function(move |_, text: mlua::String| encode(&*state2, text))?;
+    let _count = lua.create_function(move |_, text: mlua::String| count(&*state3, text))?;
 
     let exports = lua.create_table()?;
     exports.set("new", _new)?;
     exports.set("encode", _encode)?;
+    exports.set("count", _count)?;
     Ok(exports)
 }
 
@@ -224,17 +294,30 @@ fn new(
             .map_err(|e| format!("Failed to read line from encoder file: {}", e))
             .unwrap();
         let mut parts = line.split_whitespace();
-        let token_b64 = parts.next()
-            .ok_or_else(|| format!("Invalid encoder file format: missing token in line '{}'", line))
+        let token_b64 = parts
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "Invalid encoder file format: missing token in line '{}'",
+                    line
+                )
+            })
             .unwrap();
         let token = BASE64_STANDARD
             .decode(token_b64.as_bytes())
             .map_err(|e| format!("Failed to decode base64 token '{}': {}", token_b64, e))
             .unwrap();
-        let rank_str = parts.next()
-            .ok_or_else(|| format!("Invalid encoder file format: missing rank in line '{}'", line))
+        let rank_str = parts
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "Invalid encoder file format: missing rank in line '{}'",
+                    line
+                )
+            })
             .unwrap();
-        let rank = rank_str.parse()
+        let rank = rank_str
+            .parse()
             .map_err(|e| format!("Failed to parse rank '{}': {}", rank_str, e))
             .unwrap();
         encoder.insert(token, rank);
@@ -257,7 +340,9 @@ fn new(
         .collect();
     let mut sorted_token_bytes: Vec<Vec<u8>> = encoder.keys().cloned().collect();
     sorted_token_bytes.sort();
-    let mut core_bpe_lock = state.core_bpe.lock()
+    let mut core_bpe_lock = state
+        .core_bpe
+        .lock()
         .map_err(|e| format!("Failed to acquire lock on core_bpe: {}", e))
         .unwrap();
     *core_bpe_lock = Some(CoreBPENative {
@@ -286,6 +371,20 @@ fn encode(state: &State, text: mlua::String) -> LuaResult<(Vec<usize>, usize, us
         .as_ref()
         .ok_or_else(|| mlua::Error::external("Core BPE not initialized"))?
         ._encode_native(&encoded_str, &allowed_special, max_tokens))
+}
+
+fn count(state: &State, text: mlua::String) -> LuaResult<usize> {
+    let text_bytes = text.as_bytes();
+    let encoded_str = String::from_utf8_lossy(&text_bytes);
+    let allowed_special = HashSet::new();
+
+    Ok(state
+        .core_bpe
+        .lock()
+        .map_err(|e| mlua::Error::external(format!("Failed to acquire lock on core_bpe: {}", e)))?
+        .as_ref()
+        .ok_or_else(|| mlua::Error::external("Core BPE not initialized"))?
+        ._count_native(&encoded_str, &allowed_special))
 }
 
 pub struct CoreBPENative {
@@ -331,7 +430,8 @@ impl CoreBPENative {
             let piece = mat
                 .map_err(|e| format!("Regex matching failed: {}", e))
                 .unwrap()
-                .as_str().as_bytes();
+                .as_str()
+                .as_bytes();
             if let Some(token) = self.encoder.get(piece) {
                 ret.push(*token);
                 continue;
@@ -359,8 +459,14 @@ impl CoreBPENative {
             let mut start_find = start;
             loop {
                 // Find the next allowed special token, if any
-                next_special = special_regex.find_from_pos(text, start_find)
-                    .map_err(|e| format!("Special regex matching failed at position {}: {}", start_find, e))
+                next_special = special_regex
+                    .find_from_pos(text, start_find)
+                    .map_err(|e| {
+                        format!(
+                            "Special regex matching failed at position {}: {}",
+                            start_find, e
+                        )
+                    })
                     .unwrap();
                 match next_special {
                     Some(m) => {
@@ -379,7 +485,8 @@ impl CoreBPENative {
                 let piece = mat
                     .map_err(|e| format!("Regex matching failed in text slice: {}", e))
                     .unwrap()
-                    .as_str().as_bytes();
+                    .as_str()
+                    .as_bytes();
                 if let Some(token) = self.encoder.get(piece) {
                     last_piece_token_len = 1;
                     ret.push(*token);
@@ -419,6 +526,63 @@ impl CoreBPENative {
         // last_piece_token_len is how many tokens came from the last regex split. This is used
         // for determining unstable tokens, since you can't merge across (stable) regex splits
         (ret, last_piece_token_len, start)
+    }
+
+    pub fn _count_native(&self, text: &str, allowed_special: &HashSet<&str>) -> usize {
+        let special_regex = self._get_tl_special_regex();
+        let regex = self._get_tl_regex();
+        let mut count = 0;
+
+        let mut start = 0;
+        loop {
+            let mut next_special;
+            let mut start_find = start;
+            loop {
+                next_special = special_regex
+                    .find_from_pos(text, start_find)
+                    .map_err(|e| {
+                        format!(
+                            "Special regex matching failed at position {}: {}",
+                            start_find, e
+                        )
+                    })
+                    .unwrap();
+                match next_special {
+                    Some(m) => {
+                        if allowed_special.contains(&text[m.start()..m.end()]) {
+                            break;
+                        }
+                        start_find = m.start() + 1;
+                    }
+                    None => break,
+                }
+            }
+            let end = next_special.map_or(text.len(), |m| m.start());
+
+            for mat in regex.find_iter(&text[start..end]) {
+                let piece = mat
+                    .map_err(|e| format!("Regex matching failed in text slice: {}", e))
+                    .unwrap()
+                    .as_str()
+                    .as_bytes();
+                if self.encoder.contains_key(piece) {
+                    count += 1;
+                    continue;
+                }
+
+                count += byte_pair_count(piece, &self.encoder);
+            }
+
+            match next_special {
+                Some(m) => {
+                    count += 1;
+                    start = m.end();
+                }
+                None => break,
+            }
+        }
+
+        count
     }
 
     pub fn _encode_bytes(&self, bytes: &[u8]) -> Vec<usize> {
